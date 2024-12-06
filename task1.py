@@ -1,5 +1,4 @@
 import numpy as np
-from scipy.linalg import block_diag
 import pandas as pd
 from datetime import datetime
 import matplotlib.pyplot as plt
@@ -17,9 +16,9 @@ class ExtendedKalmanFilter:
         else:
             self.x = np.zeros(self.state_dim)
         
-        # Initialize state covariance matrix with more realistic values
+        # Initialize state covariance matrix
         self.P = np.diag([
-            100.0, 100.0, 100.0,  # Position uncertainty (m²)
+            1.0, 1.0, 1.0,  # Position uncertainty (m²)
             10.0, 10.0, 10.0,     # Velocity uncertainty (m²/s²)
             1e-6, 1e-8           # Clock bias and drift uncertainty
         ])
@@ -27,25 +26,20 @@ class ExtendedKalmanFilter:
         # Earth's gravitational constant (m³/s²)
         self.mu = 3.986004418e14
         
-        # Process noise parameters with better tuned values
-        self.q_pos = 1e-4  # Position process noise
-        self.q_vel = 1e-3  # Velocity process noise
-        self.q_clock = 1e-5  # Clock process noise
+        # Process noise parameters
+        self.q_pos = 1e2  # Position process noise
+        self.q_vel = 1e3  # Velocity process noise
+        self.q_clock = 1  # Clock process noise
         
-        # Measurement noise with realistic GPS uncertainties
+        # Measurement noise
         self.R = np.diag([
-            5.0, 5.0, 5.0,  # Position measurement noise (m²)
+            1.0, 1.0, 1.0,  # Position measurement noise (m²)
             1e-8            # Clock measurement noise
         ])
-        
-        # Add spike detection parameters
-        self.pos_spike_threshold = 1e4  # meters
-        self.vel_spike_threshold = 1e4  # m/s
-        self.last_valid_state = None
     
     def state_transition(self, state, dt):
         """
-        Nonlinear state transition function
+        Nonlinear state transition using orbital dynamics
         """
         x, y, z = state[0:3]
         vx, vy, vz = state[3:6]
@@ -82,7 +76,6 @@ class ExtendedKalmanFilter:
         r3 = r**3
         r5 = r**5
         
-        # Initialize Jacobian
         F = np.zeros((self.state_dim, self.state_dim))
         
         # Position derivatives
@@ -102,59 +95,31 @@ class ExtendedKalmanFilter:
         
         return F
     
-    def get_process_noise(self, dt):
-        """
-        Calculate the process noise covariance matrix Q
-        """
-        Q = np.zeros((self.state_dim, self.state_dim))
-        Q[0:3, 0:3] = np.eye(3) * self.q_pos * dt**3 / 3  # Position terms
-        Q[3:6, 3:6] = np.eye(3) * self.q_vel * dt  # Velocity terms
-        Q[6:8, 6:8] = np.array([[self.q_clock * dt, 0],
-                               [0, self.q_clock * dt**2]])  # Clock terms
-        return Q
-    
     def predict(self, dt):
         """
-        Predict step of EKF using orbital dynamics
+        Predict step using orbital dynamics
         """
-        # Predict state using nonlinear model
+        # Predict state
         self.x = self.state_transition(self.x, dt)
         
         # Calculate Jacobian
         F = self.calculate_jacobian(self.x, dt)
         
-        # Get process noise covariance
-        Q = self.get_process_noise(dt)
+        # Process noise
+        Q = np.zeros((self.state_dim, self.state_dim))
+        Q[0:3, 0:3] = np.eye(3) * self.q_pos * dt**3 / 3
+        Q[3:6, 3:6] = np.eye(3) * self.q_vel * dt
+        Q[6:8, 6:8] = np.array([[self.q_clock * dt, 0],
+                               [0, self.q_clock * dt**2]])
         
         # Predict covariance
         self.P = F @ self.P @ F.T + Q
     
-    def is_spike(self, measurement):
-        """
-        Detect if measurement contains unrealistic spikes
-        """
-        if self.last_valid_state is None:
-            self.last_valid_state = self.x
-            return False
-            
-        # Check position spikes
-        pos_diff = np.linalg.norm(measurement[0:3] - self.last_valid_state[0:3])
-        if pos_diff > self.pos_spike_threshold:
-            return True
-            
-        return False
-        
     def update(self, measurement):
         """
-        Update step of EKF with spike detection
+        Update step
         """
-        # Check for spikes in measurement
-        if self.is_spike(measurement):
-            print(f"Spike detected in measurement: {measurement[0:3]}")
-            # Skip update step for spike measurements
-            return
-            
-        # Measurement matrix (linear for this case)
+        # Measurement matrix
         H = np.zeros((self.measurement_dim, self.state_dim))
         H[0:3, 0:3] = np.eye(3)  # Position measurements
         H[3, 6] = 1  # Clock bias measurement
@@ -173,30 +138,27 @@ class ExtendedKalmanFilter:
         
         # Update covariance
         self.P = (np.eye(self.state_dim) - K @ H) @ self.P
-        
-        # Store valid state
-        self.last_valid_state = self.x.copy()
 
-def process_gps_data(filename):
+def filter_extreme_data(df):
     """
-    Process GPS measurement data with spike filtering
+    Filter out data points beyond ±1e9
     """
-    # Read CSV file
-    df = pd.read_csv(filename)
+    filtered_df = df.copy()
+    threshold = 1e9
+    filtered_df = filtered_df[abs(filtered_df['position']) < threshold]
+    return filtered_df
+
+def process_and_filter_data(df):
+    """
+    Process and filter GPS data
+    """
+    # Filter extreme values
+    filtered_df = filter_extreme_data(df)
     
-    # Add basic data cleaning
-    df = df.replace([np.inf, -np.inf], np.nan)
-    
-    # Filter out obvious spikes in position and velocity
-    pos_mask = (abs(df['position']) < 1e7)  # Filter unrealistic positions
-    vel_mask = (abs(df['velocity']) < 1e5)  # Filter unrealistic velocities
-    df = df[pos_mask & vel_mask]
-    
-    # Get first measurement to initialize EKF
-    first_group = df[df['time'] == df['time'].iloc[0]]
+    # Initialize EKF with first measurement
+    first_group = filtered_df[filtered_df['time'] == filtered_df['time'].iloc[0]]
     initial_state = np.zeros(8)
     
-    # Initialize position from first measurement
     for _, row in first_group.iterrows():
         if row['ECEF'] == 'x':
             initial_state[0] = row['position']
@@ -207,33 +169,28 @@ def process_gps_data(filename):
         elif row['ECEF'] == 'z':
             initial_state[2] = row['position']
             initial_state[5] = row['velocity']
-        initial_state[6] = row['clock']  # Clock bias
-        initial_state[7] = row['dclock']  # Clock drift
+        initial_state[6] = row['clock']
+        initial_state[7] = row['dclock']
     
-    # Initialize EKF with first measurement
+    # Initialize EKF
     ekf = ExtendedKalmanFilter(initial_state)
     
-    # Initialize results storage
+    # Process measurements
     results = []
     prev_time = None
     
-    # Group measurements by timestamp
-    grouped = df.groupby('time')
-    
-    for time, group in grouped:
-        # Convert time string to datetime
+    for time, group in filtered_df.groupby('time'):
         current_time = datetime.strptime(time, '%Y-%m-%d %H:%M:%S')
         
-        # Calculate dt (time step)
         if prev_time is None:
-            dt = 30  # Initial assumption of 30 seconds
+            dt = 30
         else:
             dt = (current_time - prev_time).total_seconds()
         
-        # Predict step
+        # Predict
         ekf.predict(dt)
         
-        # Prepare measurement vector
+        # Prepare measurement
         measurement = np.zeros(4)
         for _, row in group.iterrows():
             if row['ECEF'] == 'x':
@@ -244,7 +201,7 @@ def process_gps_data(filename):
                 measurement[2] = row['position']
             measurement[3] = row['clock']
         
-        # Update step
+        # Update
         ekf.update(measurement)
         
         # Store results
@@ -262,61 +219,73 @@ def process_gps_data(filename):
         
         prev_time = current_time
     
-    # Convert results to DataFrame
-    results_df = pd.DataFrame(results)
-    return results_df
+    return pd.DataFrame(results)
 
-def plot_results(results_df):
+def plot_results(raw_df, filtered_results):
     """
-    Plot the EKF results with improved visualization using scatter plots
+    Plot raw and filtered results
     """
-    # Create figure with subplots
     fig = plt.figure(figsize=(15, 10))
     
-    # 3D trajectory plot
+    # 3D trajectory
     ax1 = fig.add_subplot(221, projection='3d')
-    ax1.scatter(results_df['x_est'], results_df['y_est'], results_df['z_est'], 
-               c='b', s=20, alpha=0.6, label='EKF Estimate')
+    
+    # Plot only filtered raw data
+    filtered_raw_df = filter_extreme_data(raw_df)
+    grouped = filtered_raw_df.groupby('time')
+    x_raw, y_raw, z_raw = [], [], []
+    for time, group in grouped:
+        x = group[group['ECEF'] == 'x']['position'].values
+        y = group[group['ECEF'] == 'y']['position'].values
+        z = group[group['ECEF'] == 'z']['position'].values
+        if len(x) > 0 and len(y) > 0 and len(z) > 0:
+            x_raw.append(x[0])
+            y_raw.append(y[0])
+            z_raw.append(z[0])
+    
+    ax1.scatter(x_raw, y_raw, z_raw, c='gray', s=10, alpha=0.3, label='Filtered Raw Data')
+    ax1.scatter(filtered_results['x_est'], filtered_results['y_est'], 
+                filtered_results['z_est'], c='b', s=20, alpha=0.6, 
+                label='EKF Estimate')
+    
     ax1.set_xlabel('X (m)')
     ax1.set_ylabel('Y (m)')
     ax1.set_zlabel('Z (m)')
     ax1.set_title('3D Trajectory')
+    ax1.legend()
     
     # Position plots
-    times = pd.to_datetime(results_df['time'])
+    times = pd.to_datetime(filtered_results['time'])
     
-    # X position with moving average
+    # X position
     ax2 = fig.add_subplot(222)
-    window = 5  # Moving average window size
-    ax2.scatter(times, results_df['x_est'].rolling(window=window, center=True).mean(), 
-                c='b', s=20, alpha=0.8, label='Filtered')
-    ax2.scatter(times, results_df['x_est'], c='k', s=10, alpha=0.3, label='Raw')
+    ax2.scatter(times, filtered_results['x_est'], c='b', s=20, alpha=0.6, 
+                label='X Position')
     ax2.set_xlabel('Time')
     ax2.set_ylabel('X Position (m)')
     ax2.set_title('X Position vs Time')
-    ax2.legend()
     plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45)
     
-    # Velocity plots with moving average
+    # Velocity
     ax3 = fig.add_subplot(223)
-    ax3.scatter(times, results_df['vx_est'].rolling(window=window, center=True).mean(), 
-                c='r', s=20, alpha=0.6, label='VX (Filtered)')
-    ax3.scatter(times, results_df['vy_est'].rolling(window=window, center=True).mean(), 
-                c='g', s=20, alpha=0.6, label='VY (Filtered)')
-    ax3.scatter(times, results_df['vz_est'].rolling(window=window, center=True).mean(), 
-                c='b', s=20, alpha=0.6, label='VZ (Filtered)')
+    ax3.scatter(times, filtered_results['vx_est'], c='r', s=20, alpha=0.6, 
+                label='VX')
+    ax3.scatter(times, filtered_results['vy_est'], c='g', s=20, alpha=0.6, 
+                label='VY')
+    ax3.scatter(times, filtered_results['vz_est'], c='b', s=20, alpha=0.6, 
+                label='VZ')
     ax3.set_xlabel('Time')
     ax3.set_ylabel('Velocity (m/s)')
-    ax3.set_title('Velocity Components vs Time')
+    ax3.set_title('Velocity Components')
     ax3.legend()
     plt.setp(ax3.xaxis.get_majorticklabels(), rotation=45)
     
     # Clock states
     ax4 = fig.add_subplot(224)
-    ax4.scatter(times, results_df['clock_bias'].rolling(window=window, center=True).mean(), 
-                c='r', s=20, alpha=0.6, label='Clock Bias (Filtered)')
-    ax4.scatter(times, results_df['clock_drift'].rolling(window=window, center=True).mean(), 
-                c='b', s=20, alpha=0.6, label='Clock Drift (Filtered)')
+    ax4.scatter(times, filtered_results['clock_bias'], c='r', s=20, alpha=0.6, 
+                label='Clock Bias')
+    ax4.scatter(times, filtered_results['clock_drift'], c='b', s=20, alpha=0.6, 
+                label='Clock Drift')
     ax4.set_xlabel('Time')
     ax4.set_ylabel('Clock States')
     ax4.set_title('Clock States vs Time')
@@ -326,21 +295,20 @@ def plot_results(results_df):
     plt.tight_layout()
     return fig
 
-if __name__ == "__main__":
-    # Process GPS measurements
-    results = process_gps_data('GPS meas.csv')
+def main():
+    # Read data
+    df = pd.read_csv('GPS meas.csv')
     
-    # Save results to CSV
-    results.to_csv('ekf_results.csv', index=False)
+    # Process and filter data
+    filtered_results = process_and_filter_data(df)
     
     # Plot results
-    fig = plot_results(results)
+    fig = plot_results(df, filtered_results)
     
-    # Save plot
-    plt.savefig('ekf_results.png', dpi=300, bbox_inches='tight')
-    
-    print("EKF processing complete. Results saved to 'ekf_results.csv'")
-    print("Plots saved to 'ekf_results.png'")
-    
-    # Show plot (optional)
-    plt.show() 
+    # Save results
+    filtered_results.to_csv('ekf_filtered_results.csv', index=False)
+    plt.savefig('ekf_filtered_results.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+if __name__ == "__main__":
+    main()
