@@ -1,55 +1,78 @@
-# Task 2: Maneuver Detection Visualization Explanation
+# Task 2: Maneuver Detection Algorithm Explanation
 
-The visualization in task2.py uses colors and markers to help identify satellite positions and maneuvers. Here's what each color and marker represents:
+## Overview
+The maneuver detection algorithm implemented in task2.py identifies potential satellite maneuvers by analyzing acceleration patterns in the trajectory data. The algorithm uses a combination of filtering and acceleration-based detection methods.
 
-## 3D Trajectory Plot (Top)
+## Detection Logic
 
-### Points
-- **Blue dots**: Regular satellite position measurements
-  - Size: 20 points
-  - Alpha (transparency): 0.6
-  - These represent the normal trajectory points
+### 1. Data Preprocessing
+- Filter out extreme position values (beyond ±1e9 meters) to remove unrealistic measurements
+- Group measurements by timestamp to get complete state (x, y, z positions) at each time
+- Convert timestamps to time differences in seconds for acceleration calculations
 
-### Maneuver Indicators
-- **Red stars (*)**: Detected maneuvers
-  - Size: 100 points
-  - These larger red markers highlight where maneuvers were detected
-  - Each maneuver point includes a text label showing the timestamp
+### 2. Acceleration Calculation
+- Use central difference method to calculate accelerations:
+  1. First derivative (velocity): v = Δposition/Δt
+  2. Second derivative (acceleration): a = Δvelocity/Δt
+- Calculate total acceleration magnitude from all three axes:
+  ```python
+  total_accel = √(ax² + ay² + az²)
+  ```
 
-## Timeline Plot (Bottom)
+### 3. Maneuver Detection Criteria
+- Primary threshold: acceleration > 0.1 m/s² (self.accel_threshold)
+  - This threshold was chosen as it's significantly above typical orbital perturbations
+  - Natural orbital motion typically has smaller accelerations
+- Group consecutive detections:
+  - Maneuvers often span multiple measurements
+  - Points within 2 time steps are considered part of the same maneuver
+  - This helps avoid counting a single maneuver multiple times
 
-### Points
-- **Blue dots**: Regular measurements
-  - Size: 20 points
-  - Alpha (transparency): 0.6
-  - Shows the temporal distribution of measurements
+### 4. Maneuver Characterization
+For each detected maneuver, we record:
+- Start time: When acceleration exceeds threshold
+- End time: When acceleration returns below threshold
+- Maximum acceleration: Peak acceleration during the maneuver
+- Duration: Time between start and end
 
-### Maneuver Indicators
-- **Red stars (*)**: Maneuver events
-  - Size: 100 points
-  - Each maneuver has:
-    - Yellow annotation box showing acceleration magnitude
-    - Arrow pointing to the exact time of maneuver
-    - Timestamp in format "YYYY-MM-DD HH:MM"
+## Visualization
+The algorithm provides two visualization perspectives:
+1. 3D Trajectory Plot:
+   - Shows complete satellite path
+   - Marks maneuver points with red stars
+   - Includes timestamp labels for maneuvers
 
-## Color Significance
+2. Timeline Plot:
+   - Shows temporal distribution of measurements
+   - Marks maneuvers with timing and acceleration magnitude
+   - Provides clear view of maneuver sequence
 
-1. **Blue**: Used for regular, nominal satellite positions
-   - Indicates normal orbital motion
-   - Lower alpha value helps reduce visual clutter
+## Detection Parameters
+Key parameters that affect detection:
+- Acceleration threshold (0.1 m/s²)
+- Position value filter (±1e9 meters)
+- Time window for grouping (2 steps)
+- Velocity change threshold (5.0 m/s)
 
-2. **Red**: Used to highlight maneuvers
-   - High contrast against blue points
-   - Star shape makes them easily distinguishable
-   - Larger size ensures visibility
+## Limitations and Considerations
+1. The algorithm assumes:
+   - Maneuvers cause detectable acceleration changes
+   - Valid measurements have reasonable position values
+   - Maneuvers have finite duration
 
-3. **Yellow**: Used for annotation boxes
-   - High visibility against both light and dark backgrounds
-   - Semi-transparent (alpha: 0.5) to not obscure other elements
-   - Contains important maneuver information
+2. Potential false positives can come from:
+   - Measurement noise
+   - Orbital perturbations
+   - Data gaps
 
-This color scheme was chosen to:
-- Maximize contrast between normal operations and maneuvers
-- Ensure visibility of important events
-- Maintain readability of annotations
-- Reduce visual clutter while preserving information 
+3. Potential false negatives can occur with:
+   - Very gradual maneuvers
+   - Maneuvers during data gaps
+   - Maneuvers below threshold
+
+## Future Improvements
+The algorithm could be enhanced by:
+- Adding adaptive thresholds based on measurement noise
+- Incorporating velocity change criteria
+- Including orbital dynamics models
+- Adding statistical confidence measures 

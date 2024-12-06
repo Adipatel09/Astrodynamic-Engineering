@@ -10,12 +10,7 @@ class ManeuverDetector:
         self.accel_threshold = 0.1  # m/s² (threshold for detecting significant acceleration changes)
         self.velocity_change_threshold = 5.0  # m/s (threshold for sudden velocity changes)
         self.window_size = 3  # Number of measurements to use for acceleration calculation
-        
-        # Add spike detection thresholds
-        self.position_spike_threshold = 1e7  # meters (unreasonable position changes)
-        self.velocity_spike_threshold = 1e5  # m/s (unreasonable velocity changes)
-        self.max_reasonable_acceleration = 100  # m/s² (maximum reasonable acceleration)
-        
+    
     def calculate_acceleration(self, positions, times):
         """
         Calculate acceleration using central difference method
@@ -32,60 +27,16 @@ class ManeuverDetector:
         
         return accelerations
     
-    def filter_spikes(self, df):
+    def filter_extreme_data(self, df):
         """
-        Filter out measurement spikes from the data
+        Filter out data points beyond ±1e10
         """
         # Create a copy of the dataframe
         filtered_df = df.copy()
         
-        # Group by timestamp
-        grouped = filtered_df.groupby('time')
-        
-        # Lists to store valid measurements
-        valid_times = []
-        valid_measurements = []
-        
-        last_valid_pos = None
-        last_valid_time = None
-        
-        for time, group in grouped:
-            current_time = pd.to_datetime(time)
-            
-            # Get position measurements
-            x = group[group['ECEF'] == 'x']['position'].values
-            y = group[group['ECEF'] == 'y']['position'].values
-            z = group[group['ECEF'] == 'z']['position'].values
-            
-            if len(x) > 0 and len(y) > 0 and len(z) > 0:
-                current_pos = np.array([x[0], y[0], z[0]])
-                
-                is_spike = False
-                
-                if last_valid_pos is not None and last_valid_time is not None:
-                    # Calculate time difference in seconds
-                    dt = (current_time - last_valid_time).total_seconds()
-                    
-                    # Calculate position change
-                    pos_change = np.linalg.norm(current_pos - last_valid_pos)
-                    
-                    # Calculate velocity
-                    velocity = pos_change / dt if dt > 0 else 0
-                    
-                    # Check for spikes
-                    if (pos_change > self.position_spike_threshold or 
-                        velocity > self.velocity_spike_threshold):
-                        is_spike = True
-                
-                if not is_spike:
-                    valid_times.append(time)
-                    valid_measurements.append(group)
-                    last_valid_pos = current_pos
-                    last_valid_time = current_time
-        
-        # Combine valid measurements into new dataframe
-        if valid_measurements:
-            filtered_df = pd.concat(valid_measurements)
+        # Filter out positions beyond threshold
+        threshold = 1e9
+        filtered_df = filtered_df[abs(filtered_df['position']) < threshold]
         
         return filtered_df
     
@@ -93,8 +44,8 @@ class ManeuverDetector:
         """
         Detect potential maneuvers in satellite trajectory
         """
-        # First filter out spikes
-        filtered_df = self.filter_spikes(df)
+        # First filter out extreme data points
+        filtered_df = self.filter_extreme_data(df)
         
         # Convert time strings to datetime objects
         times = pd.to_datetime(filtered_df['time'])
@@ -272,19 +223,19 @@ def main():
     # Initialize maneuver detector
     detector = ManeuverDetector()
     
-    # Get filtered data and detect maneuvers
-    filtered_df = detector.filter_spikes(df)
+    # Filter extreme data and detect maneuvers
+    filtered_df = detector.filter_extreme_data(df)
     maneuvers = detector.detect_maneuvers(filtered_df)
     
     # Print filtering results
-    total_measurements = len(df['time'].unique())
-    filtered_measurements = len(filtered_df['time'].unique())
+    total_measurements = len(df)
+    filtered_measurements = len(filtered_df)
     filtered_out = total_measurements - filtered_measurements
     
     print(f"\nData Filtering Results:")
     print(f"Total measurements: {total_measurements}")
-    print(f"Measurements after spike filtering: {filtered_measurements}")
-    print(f"Spikes filtered out: {filtered_out}")
+    print(f"Measurements after filtering: {filtered_measurements}")
+    print(f"Points filtered out: {filtered_out}")
     
     # Print detected maneuvers
     print(f"\nDetected {len(maneuvers)} potential maneuvers:")
