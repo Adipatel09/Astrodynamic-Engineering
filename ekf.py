@@ -17,19 +17,31 @@ class ExtendedKalmanFilter:
         else:
             self.x = np.zeros(self.state_dim)
         
-        # Initialize state covariance matrix
-        self.P = np.eye(self.state_dim) * 1000  # Large initial uncertainty
+        # Initialize state covariance matrix with more realistic values
+        self.P = np.diag([
+            100.0, 100.0, 100.0,  # Position uncertainty (m²)
+            10.0, 10.0, 10.0,     # Velocity uncertainty (m²/s²)
+            1e-6, 1e-8           # Clock bias and drift uncertainty
+        ])
         
         # Earth's gravitational constant (m³/s²)
         self.mu = 3.986004418e14
         
-        # Process noise parameters
-        self.q_pos = 1.0  # Increased position process noise
-        self.q_vel = 1.0  # Increased velocity process noise
-        self.q_clock = 0.1  # Clock process noise
+        # Process noise parameters with better tuned values
+        self.q_pos = 1e-4  # Position process noise
+        self.q_vel = 1e-3  # Velocity process noise
+        self.q_clock = 1e-5  # Clock process noise
         
-        # Measurement noise
-        self.R = np.eye(self.measurement_dim) * 10.0  # Increased measurement noise
+        # Measurement noise with realistic GPS uncertainties
+        self.R = np.diag([
+            5.0, 5.0, 5.0,  # Position measurement noise (m²)
+            1e-8            # Clock measurement noise
+        ])
+        
+        # Add spike detection parameters
+        self.pos_spike_threshold = 1e4  # meters
+        self.vel_spike_threshold = 1e4  # m/s
+        self.last_valid_state = None
     
     def state_transition(self, state, dt):
         """
@@ -90,6 +102,17 @@ class ExtendedKalmanFilter:
         
         return F
     
+    def get_process_noise(self, dt):
+        """
+        Calculate the process noise covariance matrix Q
+        """
+        Q = np.zeros((self.state_dim, self.state_dim))
+        Q[0:3, 0:3] = np.eye(3) * self.q_pos * dt**3 / 3  # Position terms
+        Q[3:6, 3:6] = np.eye(3) * self.q_vel * dt  # Velocity terms
+        Q[6:8, 6:8] = np.array([[self.q_clock * dt, 0],
+                               [0, self.q_clock * dt**2]])  # Clock terms
+        return Q
+    
     def predict(self, dt):
         """
         Predict step of EKF using orbital dynamics
@@ -100,20 +123,37 @@ class ExtendedKalmanFilter:
         # Calculate Jacobian
         F = self.calculate_jacobian(self.x, dt)
         
-        # Process noise covariance
-        Q = np.zeros((self.state_dim, self.state_dim))
-        Q[0:3, 0:3] = np.eye(3) * self.q_pos * dt**2
-        Q[3:6, 3:6] = np.eye(3) * self.q_vel * dt
-        Q[6:8, 6:8] = np.array([[self.q_clock * dt**3/3, self.q_clock * dt**2/2],
-                               [self.q_clock * dt**2/2, self.q_clock * dt]])
+        # Get process noise covariance
+        Q = self.get_process_noise(dt)
         
         # Predict covariance
         self.P = F @ self.P @ F.T + Q
     
+    def is_spike(self, measurement):
+        """
+        Detect if measurement contains unrealistic spikes
+        """
+        if self.last_valid_state is None:
+            self.last_valid_state = self.x
+            return False
+            
+        # Check position spikes
+        pos_diff = np.linalg.norm(measurement[0:3] - self.last_valid_state[0:3])
+        if pos_diff > self.pos_spike_threshold:
+            return True
+            
+        return False
+        
     def update(self, measurement):
         """
-        Update step of EKF
+        Update step of EKF with spike detection
         """
+        # Check for spikes in measurement
+        if self.is_spike(measurement):
+            print(f"Spike detected in measurement: {measurement[0:3]}")
+            # Skip update step for spike measurements
+            return
+            
         # Measurement matrix (linear for this case)
         H = np.zeros((self.measurement_dim, self.state_dim))
         H[0:3, 0:3] = np.eye(3)  # Position measurements
@@ -133,13 +173,24 @@ class ExtendedKalmanFilter:
         
         # Update covariance
         self.P = (np.eye(self.state_dim) - K @ H) @ self.P
+        
+        # Store valid state
+        self.last_valid_state = self.x.copy()
 
 def process_gps_data(filename):
     """
-    Process GPS measurement data
+    Process GPS measurement data with spike filtering
     """
     # Read CSV file
     df = pd.read_csv(filename)
+    
+    # Add basic data cleaning
+    df = df.replace([np.inf, -np.inf], np.nan)
+    
+    # Filter out obvious spikes in position and velocity
+    pos_mask = (abs(df['position']) < 1e7)  # Filter unrealistic positions
+    vel_mask = (abs(df['velocity']) < 1e5)  # Filter unrealistic velocities
+    df = df[pos_mask & vel_mask]
     
     # Get first measurement to initialize EKF
     first_group = df[df['time'] == df['time'].iloc[0]]
@@ -217,7 +268,7 @@ def process_gps_data(filename):
 
 def plot_results(results_df):
     """
-    Plot the EKF results
+    Plot the EKF results with improved visualization
     """
     # Create figure with subplots
     fig = plt.figure(figsize=(15, 10))
@@ -233,19 +284,26 @@ def plot_results(results_df):
     # Position plots
     times = pd.to_datetime(results_df['time'])
     
-    # X position
+    # X position with moving average
     ax2 = fig.add_subplot(222)
-    ax2.plot(times, results_df['x_est'])
+    window = 5  # Moving average window size
+    ax2.plot(times, results_df['x_est'].rolling(window=window, center=True).mean(), 
+             label='Filtered')
+    ax2.plot(times, results_df['x_est'], 'k.', alpha=0.3, label='Raw')
     ax2.set_xlabel('Time')
     ax2.set_ylabel('X Position (m)')
     ax2.set_title('X Position vs Time')
+    ax2.legend()
     plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45)
     
-    # Velocity plots
+    # Velocity plots with moving average
     ax3 = fig.add_subplot(223)
-    ax3.plot(times, results_df['vx_est'], label='VX')
-    ax3.plot(times, results_df['vy_est'], label='VY')
-    ax3.plot(times, results_df['vz_est'], label='VZ')
+    ax3.plot(times, results_df['vx_est'].rolling(window=window, center=True).mean(), 
+             label='VX (Filtered)')
+    ax3.plot(times, results_df['vy_est'].rolling(window=window, center=True).mean(), 
+             label='VY (Filtered)')
+    ax3.plot(times, results_df['vz_est'].rolling(window=window, center=True).mean(), 
+             label='VZ (Filtered)')
     ax3.set_xlabel('Time')
     ax3.set_ylabel('Velocity (m/s)')
     ax3.set_title('Velocity Components vs Time')
@@ -254,8 +312,10 @@ def plot_results(results_df):
     
     # Clock states
     ax4 = fig.add_subplot(224)
-    ax4.plot(times, results_df['clock_bias'], label='Clock Bias')
-    ax4.plot(times, results_df['clock_drift'], label='Clock Drift')
+    ax4.plot(times, results_df['clock_bias'].rolling(window=window, center=True).mean(), 
+             label='Clock Bias (Filtered)')
+    ax4.plot(times, results_df['clock_drift'].rolling(window=window, center=True).mean(), 
+             label='Clock Drift (Filtered)')
     ax4.set_xlabel('Time')
     ax4.set_ylabel('Clock States')
     ax4.set_title('Clock States vs Time')
