@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
 class ExtendedKalmanFilter:
-    def __init__(self, initial_state=None):
+    def __init__(self, initial_state=None, dt=1800):
         # State vector: [x, y, z, vx, vy, vz, clock_bias, clock_drift]
         self.state_dim = 6
         self.measurement_dim = 6  # x, y, z, clock measurements
@@ -16,22 +16,24 @@ class ExtendedKalmanFilter:
         else:
             self.x = np.zeros(self.state_dim)
         
+        process_pos_noise = 1e0 * dt**3 / 3
+        process_vel_noise = 1e0 * dt
         # Initialize state covariance matrix
         self.P = np.diag([
-            1.0, 1.0, 1.0,  # Position uncertainty (m²)
-            10.0, 10.0, 10.0,     # Velocity uncertainty (m²/s²)
+            process_pos_noise, process_pos_noise, process_pos_noise,
+            process_vel_noise, process_vel_noise, process_vel_noise
         ])
         
         # Earth's gravitational constant (m³/s²)
-        self.mu = 3.986004418e14
-        # self.mu = 0
+        # self.mu = 3.986004418e14
+        self.mu = 0
         
         # Process noise parameters
         self.q_pos = 1e2  # Position process noise
         self.q_vel = 1e3  # Velocity process noise
 
-        mea_pos_noise = 1e-1
-        mea_vel_noise = 1e-1
+        mea_pos_noise = 1e1
+        mea_vel_noise = 1e1
         
         # Measurement noise
         self.R = np.diag([
