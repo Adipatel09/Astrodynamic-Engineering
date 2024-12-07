@@ -3,176 +3,140 @@ import numpy as np
 from datetime import datetime
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+from task1 import ExtendedKalmanFilter, process_and_filter_data
+
+def filter_extreme_data(df):
+    """
+    Filter out data points beyond ±1e8
+    """
+    filtered_df = df.copy()
+    threshold = 1e4
+    filtered_df = filtered_df[abs(filtered_df['position']) < threshold]
+    return filtered_df
 
 class ManeuverDetector:
     def __init__(self):
         # Thresholds for maneuver detection
-        self.accel_threshold = 0.1  # m/s² (threshold for detecting significant acceleration changes)
-        self.velocity_change_threshold = 5.0  # m/s (threshold for sudden velocity changes)
-        self.window_size = 3  # Number of measurements to use for acceleration calculation
+        self.velocity_threshold = 0.001  # m/s (mm/s threshold for detecting velocity changes)
+        self.position_threshold = 1.0    # m (position change threshold)
+        self.window_size = 5  # Number of measurements for moving average
+        self.min_duration = 30  # Minimum duration between maneuvers (seconds)
     
-    def calculate_acceleration(self, positions, times):
+    def detect_maneuvers(self, ekf_results):
         """
-        Calculate acceleration using central difference method
+        Detect potential maneuvers using EKF filtered results
         """
-        # Convert time differences to seconds
-        dt = np.diff(times)
-        
-        # Calculate velocities
-        velocities = np.diff(positions) / dt
-        
-        # Calculate acceleration
-        dt_accel = (dt[:-1] + dt[1:]) / 2
-        accelerations = np.diff(velocities) / dt_accel
-        
-        return accelerations
-    
-    def filter_extreme_data(self, df):
-        """
-        Filter out data points beyond ±1e10
-        """
-        # Create a copy of the dataframe
-        filtered_df = df.copy()
-        
-        # Filter out positions beyond threshold
-        threshold = 1e9
-        filtered_df = filtered_df[abs(filtered_df['position']) < threshold]
-        
-        return filtered_df
-    
-    def detect_maneuvers(self, df):
-        """
-        Detect potential maneuvers in satellite trajectory
-        """
-        # First filter out extreme data points
-        filtered_df = self.filter_extreme_data(df)
-        
-        # Convert time strings to datetime objects
-        times = pd.to_datetime(filtered_df['time'])
-        time_diffs = np.array([(t - times[0]).total_seconds() for t in times])
-        
-        # Group by timestamp to get complete state at each time
-        grouped = filtered_df.groupby('time')
-        
-        # Initialize arrays for positions and detected maneuvers
-        positions_x = []
-        positions_y = []
-        positions_z = []
-        timestamps = []
         maneuvers = []
         
-        # Process each timestamp
-        for time, group in grouped:
-            x = group[group['ECEF'] == 'x']['position'].values
-            y = group[group['ECEF'] == 'y']['position'].values
-            z = group[group['ECEF'] == 'z']['position'].values
-            
-            if len(x) > 0 and len(y) > 0 and len(z) > 0:
-                positions_x.append(x[0])
-                positions_y.append(y[0])
-                positions_z.append(z[0])
-                timestamps.append(time)
+        # Calculate velocity and position magnitudes
+        velocities = np.sqrt(
+            ekf_results['vx_est']**2 + 
+            ekf_results['vy_est']**2 + 
+            ekf_results['vz_est']**2
+        )
         
-        # Convert to numpy arrays
-        positions_x = np.array(positions_x)
-        positions_y = np.array(positions_y)
-        positions_z = np.array(positions_z)
-        timestamps = np.array(timestamps)
+        positions = np.sqrt(
+            ekf_results['x_est']**2 + 
+            ekf_results['y_est']**2 + 
+            ekf_results['z_est']**2
+        )
         
-        # Calculate accelerations for each axis
-        times_sec = np.array([(pd.to_datetime(t) - pd.to_datetime(timestamps[0])).total_seconds() 
-                            for t in timestamps])
+        # Calculate changes
+        velocity_changes = np.abs(np.diff(velocities))
+        position_changes = np.abs(np.diff(positions))
         
-        # Need at least 3 points to calculate acceleration
-        if len(times_sec) >= 3:
-            ax = self.calculate_acceleration(positions_x, times_sec)
-            ay = self.calculate_acceleration(positions_y, times_sec)
-            az = self.calculate_acceleration(positions_z, times_sec)
+        # Use moving average to smooth out noise
+        window = np.ones(self.window_size) / self.window_size
+        smoothed_vel_changes = np.convolve(velocity_changes, window, mode='valid')
+        smoothed_pos_changes = np.convolve(position_changes, window, mode='valid')
+        
+        # Skip first hour of data (initialization period)
+        times = pd.to_datetime(ekf_results['time'])
+        start_time = times.iloc[0]
+        valid_indices = times > (start_time + pd.Timedelta(hours=1))
+        
+        # Ensure arrays have same length for comparison
+        min_length = min(len(smoothed_vel_changes), len(smoothed_pos_changes))
+        smoothed_vel_changes = smoothed_vel_changes[:min_length]
+        smoothed_pos_changes = smoothed_pos_changes[:min_length]
+        
+        # Detect maneuvers based on both velocity and position changes
+        maneuver_indices = np.where(
+            (smoothed_vel_changes > self.velocity_threshold) & 
+            (smoothed_pos_changes > self.position_threshold)
+        )[0]
+        
+        # Adjust indices to account for the convolution window
+        maneuver_indices = maneuver_indices + self.window_size - 1
+        
+        maneuver_indices = maneuver_indices[maneuver_indices < len(valid_indices)]
+        maneuver_indices = maneuver_indices[valid_indices.iloc[maneuver_indices]]
+        
+        # Group consecutive indices into maneuver events
+        if len(maneuver_indices) > 0:
+            maneuver_events = []
+            current_event = [maneuver_indices[0]]
             
-            # Calculate total acceleration magnitude
-            total_accel = np.sqrt(ax[:-1]**2 + ay[:-1]**2 + az[:-1]**2)
+            for i in range(1, len(maneuver_indices)):
+                time_diff = (times.iloc[maneuver_indices[i]] - 
+                           times.iloc[maneuver_indices[i-1]]).total_seconds()
+                
+                if time_diff <= self.min_duration:
+                    current_event.append(maneuver_indices[i])
+                else:
+                    maneuver_events.append(current_event)
+                    current_event = [maneuver_indices[i]]
             
-            # Detect potential maneuvers
-            maneuver_indices = np.where(total_accel > self.accel_threshold)[0]
+            maneuver_events.append(current_event)
             
-            # Group consecutive indices into maneuver events
-            if len(maneuver_indices) > 0:
-                maneuver_events = []
-                current_event = [maneuver_indices[0]]
+            # Record maneuver events
+            for event in maneuver_events:
+                start_idx = event[0]
+                end_idx = event[-1]
                 
-                for i in range(1, len(maneuver_indices)):
-                    if maneuver_indices[i] - maneuver_indices[i-1] <= 2:  # Consider consecutive or near-consecutive points as same event
-                        current_event.append(maneuver_indices[i])
-                    else:
-                        maneuver_events.append(current_event)
-                        current_event = [maneuver_indices[i]]
+                # Calculate total changes during maneuver
+                total_velocity_change = np.sum(velocity_changes[start_idx:end_idx+1])
+                total_position_change = np.sum(position_changes[start_idx:end_idx+1])
                 
-                maneuver_events.append(current_event)
-                
-                # Record maneuver events
-                for event in maneuver_events:
-                    start_idx = event[0] + 1  # Adjust index due to acceleration calculation
-                    end_idx = event[-1] + 1
-                    
-                    maneuver = {
-                        'start_time': timestamps[start_idx],
-                        'end_time': timestamps[end_idx],
-                        'max_acceleration': np.max(total_accel[event]),
-                        'duration': (pd.to_datetime(timestamps[end_idx]) - 
-                                   pd.to_datetime(timestamps[start_idx])).total_seconds()
-                    }
-                    maneuvers.append(maneuver)
+                maneuver = {
+                    'start_time': times[start_idx],
+                    'end_time': times[end_idx],
+                    'velocity_change': total_velocity_change,
+                    'position_change': total_position_change,
+                    'duration': (times[end_idx] - times[start_idx]).total_seconds(),
+                    'start_position': (
+                        ekf_results.iloc[start_idx][['x_est', 'y_est', 'z_est']].values
+                    ),
+                    'start_velocity': (
+                        ekf_results.iloc[start_idx][['vx_est', 'vy_est', 'vz_est']].values
+                    )
+                }
+                maneuvers.append(maneuver)
         
         return maneuvers
 
-def plot_maneuvers(df, maneuvers):
+def plot_maneuvers(ekf_results, maneuvers):
     """
-    Plot satellite trajectory and detected maneuvers using scatter plots with timestamps
+    Plot satellite trajectory and detected maneuvers
     """
-    fig = plt.figure(figsize=(15, 10))
+    fig = plt.figure(figsize=(15, 12))
     
-    # Create two subplots: 3D trajectory and timeline
+    # 3D trajectory
     ax1 = fig.add_subplot(211, projection='3d')
-    ax2 = fig.add_subplot(212)
     
-    # Group data by timestamp
-    grouped = df.groupby('time')
-    x, y, z = [], [], []
-    times = []
+    # Plot EKF trajectory
+    ax1.scatter(ekf_results['x_est'], ekf_results['y_est'], ekf_results['z_est'],
+                c='blue', s=10, alpha=0.6, label='EKF Trajectory')
     
-    for time, group in grouped:
-        x_val = group[group['ECEF'] == 'x']['position'].values
-        y_val = group[group['ECEF'] == 'y']['position'].values
-        z_val = group[group['ECEF'] == 'z']['position'].values
-        
-        if len(x_val) > 0 and len(y_val) > 0 and len(z_val) > 0:
-            x.append(x_val[0])
-            y.append(y_val[0])
-            z.append(z_val[0])
-            times.append(pd.to_datetime(time))
-    
-    # Plot trajectory points in 3D
-    scatter = ax1.scatter(x, y, z, c=range(len(times)), cmap='viridis', 
-                         s=20, alpha=0.6, label='Satellite Position')
-    
-    # Highlight maneuvers in 3D plot
+    # Highlight maneuvers
     for maneuver in maneuvers:
-        start_time = maneuver['start_time']
-        end_time = maneuver['end_time']
-        
-        # Find positions during maneuver
-        maneuver_data = grouped.get_group(start_time)
-        x_man = maneuver_data[maneuver_data['ECEF'] == 'x']['position'].values[0]
-        y_man = maneuver_data[maneuver_data['ECEF'] == 'y']['position'].values[0]
-        z_man = maneuver_data[maneuver_data['ECEF'] == 'z']['position'].values[0]
-        
-        # Plot maneuver point with marker
-        ax1.scatter(x_man, y_man, z_man, c='red', s=100, marker='*', 
-                   label='Maneuver')
-        
-        # Add text annotation
-        ax1.text(x_man, y_man, z_man, 
-                f'Maneuver\n{pd.to_datetime(start_time).strftime("%Y-%m-%d %H:%M")}',
+        pos = maneuver['start_position']
+        ax1.scatter(pos[0], pos[1], pos[2], 
+                   c='red', s=100, marker='*', label='Maneuver')
+        ax1.text(pos[0], pos[1], pos[2],
+                f"Maneuver\n{maneuver['start_time'].strftime('%Y-%m-%d %H:%M')}\n"
+                f"ΔV: {maneuver['velocity_change']*1000:.1f} mm/s\n"
+                f"ΔP: {maneuver['position_change']:.1f} m",
                 fontsize=8)
     
     ax1.set_xlabel('X (m)')
@@ -180,27 +144,34 @@ def plot_maneuvers(df, maneuvers):
     ax1.set_zlabel('Z (m)')
     ax1.set_title('Satellite Trajectory with Detected Maneuvers')
     
-    # Plot timeline in bottom subplot
-    times = np.array(times)
-    ax2.scatter(times, np.zeros_like(times), c='blue', s=20, alpha=0.6, 
-               label='Measurements')
+    # Velocity magnitude plot
+    ax2 = fig.add_subplot(212)
+    times = pd.to_datetime(ekf_results['time'])
+    velocities = np.sqrt(
+        ekf_results['vx_est']**2 + 
+        ekf_results['vy_est']**2 + 
+        ekf_results['vz_est']**2
+    )
     
-    # Add maneuvers to timeline
+    ax2.plot(times, velocities, 'b-', alpha=0.6, label='Velocity Magnitude')
+    
+    # Add maneuvers to velocity plot
     for maneuver in maneuvers:
-        maneuver_time = pd.to_datetime(maneuver['start_time'])
-        ax2.scatter(maneuver_time, 0, c='red', s=100, marker='*', 
-                   label='Maneuver')
-        ax2.annotate(f'Maneuver\n{maneuver["max_acceleration"]:.2f} m/s²',
-                    xy=(maneuver_time, 0), xytext=(0, 20),
-                    textcoords='offset points', ha='center',
+        ax2.axvline(x=maneuver['start_time'], color='r', linestyle='--', alpha=0.5)
+        ax2.scatter(maneuver['start_time'], 
+                   np.sqrt(np.sum(maneuver['start_velocity']**2)),
+                   c='red', s=100, marker='*')
+        ax2.annotate(f'ΔV: {maneuver["velocity_change"]*1000:.1f} mm/s\n'
+                    f'ΔP: {maneuver["position_change"]:.1f} m',
+                    xy=(maneuver['start_time'], 
+                        np.sqrt(np.sum(maneuver['start_velocity']**2))),
+                    xytext=(10, 10), textcoords='offset points',
                     bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.5),
                     arrowprops=dict(arrowstyle='->'))
     
     ax2.set_xlabel('Time')
-    ax2.set_ylabel('Events')
-    ax2.set_title('Maneuver Timeline')
-    
-    # Format timeline x-axis
+    ax2.set_ylabel('Velocity (m/s)')
+    ax2.set_title('Velocity Magnitude with Detected Maneuvers')
     ax2.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
     plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha='right')
     
@@ -209,10 +180,6 @@ def plot_maneuvers(df, maneuvers):
     by_label1 = dict(zip(labels1, handles1))
     ax1.legend(by_label1.values(), by_label1.keys())
     
-    handles2, labels2 = ax2.get_legend_handles_labels()
-    by_label2 = dict(zip(labels2, handles2))
-    ax2.legend(by_label2.values(), by_label2.keys())
-    
     plt.tight_layout()
     return fig
 
@@ -220,22 +187,17 @@ def main():
     # Read the GPS measurements
     df = pd.read_csv('GPS meas.csv')
     
+    # Filter outliers first
+    filtered_df = filter_extreme_data(df)
+    
+    # Process data using EKF from task1
+    ekf_results = process_and_filter_data(filtered_df)
+    
     # Initialize maneuver detector
     detector = ManeuverDetector()
     
-    # Filter extreme data and detect maneuvers
-    filtered_df = detector.filter_extreme_data(df)
-    maneuvers = detector.detect_maneuvers(filtered_df)
-    
-    # Print filtering results
-    total_measurements = len(df)
-    filtered_measurements = len(filtered_df)
-    filtered_out = total_measurements - filtered_measurements
-    
-    print(f"\nData Filtering Results:")
-    print(f"Total measurements: {total_measurements}")
-    print(f"Measurements after filtering: {filtered_measurements}")
-    print(f"Points filtered out: {filtered_out}")
+    # Detect maneuvers using EKF results
+    maneuvers = detector.detect_maneuvers(ekf_results)
     
     # Print detected maneuvers
     print(f"\nDetected {len(maneuvers)} potential maneuvers:")
@@ -243,11 +205,12 @@ def main():
         print(f"\nManeuver {i}:")
         print(f"Start time: {maneuver['start_time']}")
         print(f"End time: {maneuver['end_time']}")
-        print(f"Maximum acceleration: {maneuver['max_acceleration']:.2f} m/s²")
+        print(f"Velocity change: {maneuver['velocity_change']*1000:.1f} mm/s")
+        print(f"Position change: {maneuver['position_change']:.1f} m")
         print(f"Duration: {maneuver['duration']:.1f} seconds")
     
     # Plot results
-    fig = plot_maneuvers(filtered_df, maneuvers)
+    fig = plot_maneuvers(ekf_results, maneuvers)
     plt.savefig('maneuver_detection_results.png', dpi=300, bbox_inches='tight')
     plt.show()
 
