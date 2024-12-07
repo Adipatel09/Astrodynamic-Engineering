@@ -16,24 +16,27 @@ class ExtendedKalmanFilter:
         else:
             self.x = np.zeros(self.state_dim)
         
-        process_pos_noise = 1e0 * dt**3 / 3
-        process_vel_noise = 1e0 * dt
+        p_pos_init = 1e0 * dt**3 / 3
+        p_vel_init = 1e0 * dt
         # Initialize state covariance matrix
         self.P = np.diag([
-            process_pos_noise, process_pos_noise, process_pos_noise,
-            process_vel_noise, process_vel_noise, process_vel_noise
+            p_pos_init, p_pos_init, p_pos_init,
+            p_vel_init, p_vel_init, p_vel_init
         ])
         
         # Earth's gravitational constant (m³/s²)
-        # self.mu = 3.986004418e14
-        self.mu = 0
+        self.mu = 3.986004418e14
+        
+        # J2 perturbation constant and Earth radius
+        self.J2 = 1.08262668e-3
+        self.R_earth = 6378137.0  # Earth's equatorial radius in meters
         
         # Process noise parameters
-        self.q_pos = 1e2  # Position process noise
-        self.q_vel = 1e3  # Velocity process noise
+        self.q_pos = dt**3 / 3 * 1e-1
+        self.q_vel = dt * 1e-1
 
-        mea_pos_noise = 1e1
-        mea_vel_noise = 1e1
+        mea_pos_noise = 1e-1
+        mea_vel_noise = 1e-1
         
         # Measurement noise
         self.R = np.diag([
@@ -44,55 +47,90 @@ class ExtendedKalmanFilter:
     
     def state_transition(self, state, dt):
         """
-        Nonlinear state transition using orbital dynamics
+        Nonlinear state transition using orbital dynamics with J2 perturbation
         """
         x, y, z = state[0:3]
         vx, vy, vz = state[3:6]
         
         r = np.sqrt(x**2 + y**2 + z**2)
         r3 = r**3
+        r5 = r**5
         
-        # Acceleration due to gravity
-        ax = self.mu * x / r3
-        ay = self.mu * y / r3
-        az = self.mu * z / r3
+        # Basic gravitational acceleration
+        ax = -self.mu * x / r3
+        ay = -self.mu * y / r3
+        az = -self.mu * z / r3
+        
+        # J2 perturbation acceleration
+        factor = 1.5 * self.J2 * self.mu * self.R_earth**2 / r5
+        
+        # J2 acceleration components
+        ax_j2 = factor * x * (5 * z**2 / r**2 - 1)
+        ay_j2 = factor * y * (5 * z**2 / r**2 - 1)
+        az_j2 = factor * z * (5 * z**2 / r**2 - 3)
+        
+        # Total acceleration
+        ax_total = ax + ax_j2
+        ay_total = ay + ay_j2
+        az_total = az + az_j2
         
         # New state
         new_state = np.zeros_like(state)
-        new_state[0] = x + vx*dt + 0.5*ax*dt**2
-        new_state[1] = y + vy*dt + 0.5*ay*dt**2
-        new_state[2] = z + vz*dt + 0.5*az*dt**2
-        new_state[3] = vx + ax*dt
-        new_state[4] = vy + ay*dt
-        new_state[5] = vz + az*dt
+        new_state[0] = x + vx*dt + 0.5*ax_total*dt**2
+        new_state[1] = y + vy*dt + 0.5*ay_total*dt**2
+        new_state[2] = z + vz*dt + 0.5*az_total*dt**2
+        new_state[3] = vx + ax_total*dt
+        new_state[4] = vy + ay_total*dt
+        new_state[5] = vz + az_total*dt
         
         return new_state
     
     def calculate_jacobian(self, state, dt):
         """
-        Calculate the Jacobian matrix F for the state transition.
-        State vector: [x, y, z, vx, vy, vz, clock_bias, clock_drift]
+        Calculate the Jacobian matrix F for the state transition including J2 effects
         """
         x, y, z = state[0:3]
-        vx, vy, vz = state[3:6]
         
-        # Calculate r and r^3
         r = np.sqrt(x**2 + y**2 + z**2)
         self.prev_r = r
         if r < 1e4:
             r = self.prev_r
         r3 = r**3
         r5 = r**5
+        r7 = r**7
         
+        # Basic gravitational terms
+        dax_dx = -self.mu * (1/r3 - 3*x**2/r5)
+        dax_dy = self.mu * 3*x*y/r5
+        dax_dz = self.mu * 3*x*z/r5
+        
+        day_dx = self.mu * 3*x*y/r5
+        day_dy = -self.mu * (1/r3 - 3*y**2/r5)
+        day_dz = self.mu * 3*y*z/r5
+        
+        daz_dx = self.mu * 3*x*z/r5
+        daz_dy = self.mu * 3*y*z/r5
+        daz_dz = -self.mu * (1/r3 - 3*z**2/r5)
+        
+        # J2 terms
+        J2_factor = 1.5 * self.J2 * self.mu * self.R_earth**2
+        
+        # Partial derivatives of J2 acceleration
+        # These are complex expressions - adding only the most significant terms
+        dax_dx_j2 = J2_factor * ((5*z**2/r**2 - 1)/r5 - 10*x**2*z**2/r7)
+        day_dy_j2 = J2_factor * ((5*z**2/r**2 - 1)/r5 - 10*y**2*z**2/r7)
+        daz_dz_j2 = J2_factor * ((15*z**2/r**2 - 3)/r5 - 10*z**3/r7)
+        
+        # Combine basic gravity and J2 terms
         F = np.zeros((6, 6))
-        
-        # finish the jacobian matrix
         F[0:3, 3:6] = np.eye(3) * dt
+        
+        # Position derivatives
         F[3:6, 0:3] = np.array([
-            [-self.mu * (1/r3 - 3*x**2/r5), -self.mu * 3*x*y/r5, -self.mu * 3*x*z/r5],
-            [-self.mu * 3*x*y/r5, -self.mu * (1/r3 - 3*y**2/r5), -self.mu * 3*y*z/r5],
-            [-self.mu * 3*x*z/r5, -self.mu * 3*y*z/r5, -self.mu * (1/r3 - 3*z**2/r5)]
-        ]) * 0.5 * dt**2
+            [dax_dx + dax_dx_j2, dax_dy, dax_dz],
+            [day_dx, day_dy + day_dy_j2, day_dz],
+            [daz_dx, daz_dy, daz_dz + daz_dz_j2]
+        ]) * dt
         
         return F
     
