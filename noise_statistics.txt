@@ -1,0 +1,26 @@
+Measurement Noise Statistics:
+------------------------------
+
+X Direction:
+Position Std Dev: 3421.14 m
+Position Variance: 11704189.41 m²
+Velocity Std Dev: 37957.63 m/s
+Velocity Variance: 1440781812.03 (m/s)²
+
+Y Direction:
+Position Std Dev: 3436.97 m
+Position Variance: 11812786.61 m²
+Velocity Std Dev: 38109.28 m/s
+Velocity Variance: 1452317072.80 (m/s)²
+
+Z Direction:
+Position Std Dev: 4838.69 m
+Position Variance: 23412968.71 m²
+Velocity Std Dev: 53913.48 m/s
+Velocity Variance: 2906662952.91 (m/s)²
+
+Clock:
+Bias Std Dev: 3.77e-03
+Bias Variance: 1.42e-05
+Drift Std Dev: 0.00e+00
+Drift Variance: 0.00e+00

@@ -7,8 +7,8 @@ from mpl_toolkits.mplot3d import Axes3D
 class ExtendedKalmanFilter:
     def __init__(self, initial_state=None):
         # State vector: [x, y, z, vx, vy, vz, clock_bias, clock_drift]
-        self.state_dim = 8
-        self.measurement_dim = 4  # x, y, z, clock measurements
+        self.state_dim = 6
+        self.measurement_dim = 6  # x, y, z, clock measurements
         
         # Initialize state vector
         if initial_state is not None:
@@ -20,22 +20,25 @@ class ExtendedKalmanFilter:
         self.P = np.diag([
             1.0, 1.0, 1.0,  # Position uncertainty (m²)
             10.0, 10.0, 10.0,     # Velocity uncertainty (m²/s²)
-            1e-6, 1e-8           # Clock bias and drift uncertainty
         ])
         
         # Earth's gravitational constant (m³/s²)
         self.mu = 3.986004418e14
+        # self.mu = 0
         
         # Process noise parameters
         self.q_pos = 1e2  # Position process noise
         self.q_vel = 1e3  # Velocity process noise
-        self.q_clock = 1  # Clock process noise
+
+        mea_pos_noise = 1e-1
+        mea_vel_noise = 1e-1
         
         # Measurement noise
         self.R = np.diag([
-            1.0, 1.0, 1.0,  # Position measurement noise (m²)
-            1e-8            # Clock measurement noise
+            mea_pos_noise, mea_pos_noise, mea_pos_noise,
+            mea_vel_noise, mea_vel_noise, mea_vel_noise
         ])
+
     
     def state_transition(self, state, dt):
         """
@@ -43,15 +46,14 @@ class ExtendedKalmanFilter:
         """
         x, y, z = state[0:3]
         vx, vy, vz = state[3:6]
-        cb, cd = state[6:8]
         
         r = np.sqrt(x**2 + y**2 + z**2)
         r3 = r**3
         
         # Acceleration due to gravity
-        ax = -self.mu * x / r3
-        ay = -self.mu * y / r3
-        az = -self.mu * z / r3
+        ax = self.mu * x / r3
+        ay = self.mu * y / r3
+        az = self.mu * z / r3
         
         # New state
         new_state = np.zeros_like(state)
@@ -61,37 +63,34 @@ class ExtendedKalmanFilter:
         new_state[3] = vx + ax*dt
         new_state[4] = vy + ay*dt
         new_state[5] = vz + az*dt
-        new_state[6] = cb + cd*dt
-        new_state[7] = cd
         
         return new_state
     
     def calculate_jacobian(self, state, dt):
         """
-        Calculate Jacobian matrix of state transition function
+        Calculate the Jacobian matrix F for the state transition.
+        State vector: [x, y, z, vx, vy, vz, clock_bias, clock_drift]
         """
         x, y, z = state[0:3]
+        vx, vy, vz = state[3:6]
         
+        # Calculate r and r^3
         r = np.sqrt(x**2 + y**2 + z**2)
+        self.prev_r = r
+        if r < 1e4:
+            r = self.prev_r
         r3 = r**3
         r5 = r**5
         
-        F = np.zeros((self.state_dim, self.state_dim))
+        F = np.zeros((6, 6))
         
-        # Position derivatives
+        # finish the jacobian matrix
         F[0:3, 3:6] = np.eye(3) * dt
-        
-        # Velocity derivatives
         F[3:6, 0:3] = np.array([
-            [-self.mu/r3 + 3*self.mu*x**2/r5, 3*self.mu*x*y/r5, 3*self.mu*x*z/r5],
-            [3*self.mu*x*y/r5, -self.mu/r3 + 3*self.mu*y**2/r5, 3*self.mu*y*z/r5],
-            [3*self.mu*x*z/r5, 3*self.mu*y*z/r5, -self.mu/r3 + 3*self.mu*z**2/r5]
-        ]) * dt
-        F[3:6, 3:6] = np.eye(3)
-        
-        # Clock states
-        F[6, 7] = dt
-        F[6:8, 6:8] += np.eye(2)
+            [-self.mu * (1/r3 - 3*x**2/r5), -self.mu * 3*x*y/r5, -self.mu * 3*x*z/r5],
+            [-self.mu * 3*x*y/r5, -self.mu * (1/r3 - 3*y**2/r5), -self.mu * 3*y*z/r5],
+            [-self.mu * 3*x*z/r5, -self.mu * 3*y*z/r5, -self.mu * (1/r3 - 3*z**2/r5)]
+        ]) * 0.5 * dt**2
         
         return F
     
@@ -109,10 +108,7 @@ class ExtendedKalmanFilter:
         Q = np.zeros((self.state_dim, self.state_dim))
         Q[0:3, 0:3] = np.eye(3) * self.q_pos * dt**3 / 3
         Q[3:6, 3:6] = np.eye(3) * self.q_vel * dt
-        Q[6:8, 6:8] = np.array([[self.q_clock * dt, 0],
-                               [0, self.q_clock * dt**2]])
         
-        # Predict covariance
         self.P = F @ self.P @ F.T + Q
     
     def update(self, measurement):
@@ -120,9 +116,8 @@ class ExtendedKalmanFilter:
         Update step
         """
         # Measurement matrix
-        H = np.zeros((self.measurement_dim, self.state_dim))
-        H[0:3, 0:3] = np.eye(3)  # Position measurements
-        H[3, 6] = 1  # Clock bias measurement
+        # H = np.eye((self.measurement_dim, self.state_dim))
+        H = np.eye(self.measurement_dim) 
         
         # Innovation
         y = measurement - H @ self.x
@@ -139,13 +134,44 @@ class ExtendedKalmanFilter:
         # Update covariance
         self.P = (np.eye(self.state_dim) - K @ H) @ self.P
 
-def filter_extreme_data(df):
+def filter_velocity_data(df):
     """
-    Filter out data points beyond ±1e9
+    Filter velocity data points beyond 100 m/s for each direction
     """
     filtered_df = df.copy()
-    threshold = 1e9
-    filtered_df = filtered_df[abs(filtered_df['position']) < threshold]
+    vel_threshold = 100000  # 100 m/s for realistic satellite velocities
+    
+    # Filter by direction and velocity
+    filtered_data = []
+    
+    for direction in ['x', 'y', 'z']:
+        direction_data = filtered_df[filtered_df['ECEF'] == direction]
+        # Filter velocities
+        valid_velocities = direction_data[abs(direction_data['velocity']) < vel_threshold]
+        filtered_data.append(valid_velocities)
+    
+    # Combine filtered data
+    filtered_df = pd.concat(filtered_data)
+    filtered_df = filtered_df.sort_values('time')
+    
+    return filtered_df
+
+def filter_extreme_data(df):
+    """
+    Combined filtering for plotting:
+    1. Filter position data points beyond ±1e9
+    2. Filter velocity data points beyond ±100 m/s
+    """
+    filtered_df = df.copy()
+    
+    # Position filtering
+    pos_threshold = 1e9
+    filtered_df = filtered_df[abs(filtered_df['position']) < pos_threshold]
+    
+    # Velocity filtering
+    vel_threshold = 1e9
+    filtered_df = filtered_df[abs(filtered_df['velocity']) < vel_threshold]
+    
     return filtered_df
 
 def process_and_filter_data(df):
@@ -157,20 +183,20 @@ def process_and_filter_data(df):
     
     # Initialize EKF with first measurement
     first_group = filtered_df[filtered_df['time'] == filtered_df['time'].iloc[0]]
-    initial_state = np.zeros(8)
+    initial_state = np.zeros(6)
     
     for _, row in first_group.iterrows():
         if row['ECEF'] == 'x':
-            initial_state[0] = row['position']
-            initial_state[3] = row['velocity']
+            # convert km to m
+            initial_state[0] = row['position'] * 1e3
+            # convert dm/s to m/s   
+            initial_state[3] = row['velocity'] * 1e-1
         elif row['ECEF'] == 'y':
-            initial_state[1] = row['position']
-            initial_state[4] = row['velocity']
+            initial_state[1] = row['position'] * 1e3
+            initial_state[4] = row['velocity'] * 1e-1
         elif row['ECEF'] == 'z':
-            initial_state[2] = row['position']
-            initial_state[5] = row['velocity']
-        initial_state[6] = row['clock']
-        initial_state[7] = row['dclock']
+            initial_state[2] = row['position'] * 1e3
+            initial_state[5] = row['velocity'] * 1e-1
     
     # Initialize EKF
     ekf = ExtendedKalmanFilter(initial_state)
@@ -183,7 +209,7 @@ def process_and_filter_data(df):
         current_time = datetime.strptime(time, '%Y-%m-%d %H:%M:%S')
         
         if prev_time is None:
-            dt = 30
+            dt = 1800
         else:
             dt = (current_time - prev_time).total_seconds()
         
@@ -191,15 +217,17 @@ def process_and_filter_data(df):
         ekf.predict(dt)
         
         # Prepare measurement
-        measurement = np.zeros(4)
+        measurement = np.zeros(6)
         for _, row in group.iterrows():
             if row['ECEF'] == 'x':
                 measurement[0] = row['position']
+                measurement[3] = row['velocity']
             elif row['ECEF'] == 'y':
                 measurement[1] = row['position']
+                measurement[4] = row['velocity']
             elif row['ECEF'] == 'z':
                 measurement[2] = row['position']
-            measurement[3] = row['clock']
+                measurement[5] = row['velocity']
         
         # Update
         ekf.update(measurement)
@@ -213,8 +241,6 @@ def process_and_filter_data(df):
             'vx_est': ekf.x[3],
             'vy_est': ekf.x[4],
             'vz_est': ekf.x[5],
-            'clock_bias': ekf.x[6],
-            'clock_drift': ekf.x[7]
         })
         
         prev_time = current_time
@@ -230,20 +256,33 @@ def plot_results(raw_df, filtered_results):
     # 3D trajectory
     ax1 = fig.add_subplot(221, projection='3d')
     
-    # Plot only filtered raw data
-    filtered_raw_df = filter_extreme_data(raw_df)
-    grouped = filtered_raw_df.groupby('time')
+    # Plot filtered raw data
+    filtered_df = filter_extreme_data(raw_df)
+    grouped = filtered_df.groupby('time')
+    
+    # Create time series
+    times_list = []
     x_raw, y_raw, z_raw = [], [], []
+    
     for time, group in grouped:
         x = group[group['ECEF'] == 'x']['position'].values
         y = group[group['ECEF'] == 'y']['position'].values
         z = group[group['ECEF'] == 'z']['position'].values
+        
         if len(x) > 0 and len(y) > 0 and len(z) > 0:
+            times_list.append(pd.to_datetime(time))
             x_raw.append(x[0])
             y_raw.append(y[0])
             z_raw.append(z[0])
     
-    ax1.scatter(x_raw, y_raw, z_raw, c='gray', s=10, alpha=0.3, label='Filtered Raw Data')
+    # Convert lists to arrays
+    raw_times = np.array(times_list)
+    x_raw = np.array(x_raw)
+    y_raw = np.array(y_raw)
+    z_raw = np.array(z_raw)
+    
+    # Plot 3D trajectory
+    ax1.scatter(x_raw, y_raw, z_raw, c='gray', s=10, alpha=0.3, label='Raw Data')
     ax1.scatter(filtered_results['x_est'], filtered_results['y_est'], 
                 filtered_results['z_est'], c='b', s=20, alpha=0.6, 
                 label='EKF Estimate')
@@ -259,11 +298,13 @@ def plot_results(raw_df, filtered_results):
     
     # X position
     ax2 = fig.add_subplot(222)
+    ax2.scatter(raw_times, x_raw, c='gray', s=10, alpha=0.3, label='Raw X')
     ax2.scatter(times, filtered_results['x_est'], c='b', s=20, alpha=0.6, 
                 label='X Position')
     ax2.set_xlabel('Time')
     ax2.set_ylabel('X Position (m)')
     ax2.set_title('X Position vs Time')
+    ax2.legend()
     plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45)
     
     # Velocity
@@ -280,19 +321,47 @@ def plot_results(raw_df, filtered_results):
     ax3.legend()
     plt.setp(ax3.xaxis.get_majorticklabels(), rotation=45)
     
-    # Clock states
+    # Print velocity statistics
+    print("\nEKF Velocity Statistics:")
+    print(f"VX range: [{filtered_results['vx_est'].min():.2f}, {filtered_results['vx_est'].max():.2f}] m/s")
+    print(f"VY range: [{filtered_results['vy_est'].min():.2f}, {filtered_results['vy_est'].max():.2f}] m/s")
+    print(f"VZ range: [{filtered_results['vz_est'].min():.2f}, {filtered_results['vz_est'].max():.2f}] m/s")
+    
+    # Position error over time
     ax4 = fig.add_subplot(224)
-    ax4.scatter(times, filtered_results['clock_bias'], c='r', s=20, alpha=0.6, 
-                label='Clock Bias')
-    ax4.scatter(times, filtered_results['clock_drift'], c='b', s=20, alpha=0.6, 
-                label='Clock Drift')
+    
+    # Ensure the arrays have matching timestamps before calculating error
+    filtered_times = pd.to_datetime(filtered_results['time'])
+    raw_times_df = pd.DataFrame({'time': raw_times, 'x': x_raw, 'y': y_raw, 'z': z_raw})
+    filtered_df = pd.DataFrame({
+        'time': filtered_times,
+        'x': filtered_results['x_est'],
+        'y': filtered_results['y_est'],
+        'z': filtered_results['z_est']
+    })
+    
+    # Merge on matching timestamps
+    merged_df = pd.merge(raw_times_df, filtered_df, on='time', suffixes=('_raw', '_filtered'))
+    
+    # Calculate error only for matching timestamps
+    position_error = np.sqrt(
+        (merged_df['x_filtered'] - merged_df['x_raw'])**2 +
+        (merged_df['y_filtered'] - merged_df['y_raw'])**2 +
+        (merged_df['z_filtered'] - merged_df['z_raw'])**2
+    )
+    
+    ax4.scatter(merged_df['time'], position_error, c='r', s=20, alpha=0.6, label='Position Error')
+    
     ax4.set_xlabel('Time')
-    ax4.set_ylabel('Clock States')
-    ax4.set_title('Clock States vs Time')
+    ax4.set_ylabel('Position Error (m)')
+    ax4.set_title('Position Error vs Time')
     ax4.legend()
     plt.setp(ax4.xaxis.get_majorticklabels(), rotation=45)
     
     plt.tight_layout()
+    plt.savefig('ekf_filtered_results.png', dpi=300, bbox_inches='tight')
+    plt.show()
+    
     return fig
 
 def main():
